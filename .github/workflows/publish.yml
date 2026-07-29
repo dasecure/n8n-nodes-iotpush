@@ -1,9 +1,24 @@
 name: Publish to npm
 
-# Publishes n8n-nodes-iotpush with npm provenance (sigstore attestation).
-# Provenance CANNOT be generated from a local machine — it requires an OIDC
-# token that only GitHub Actions can mint. This is the hard blocker for
-# n8n community-node verification.
+# Publishes n8n-nodes-iotpush using npm TRUSTED PUBLISHING (OIDC).
+#
+# No NPM_TOKEN. No --provenance flag. Both are handled by the OIDC exchange:
+# npm verifies this workflow's identity directly and generates the provenance
+# attestation automatically, provided the repo AND the package are public.
+#
+# Classic/legacy npm tokens were disabled in Nov 2025 and revoked Dec 2025, so
+# token-based publishing now requires a granular token that expires. Trusted
+# publishing has no credential to rotate at all.
+#
+# ONE-TIME SETUP on npmjs.com (package settings -> Trusted Publisher):
+#   Publisher:          GitHub Actions
+#   Organization/user:  dasecure
+#   Repository:         n8n-nodes-iotpush
+#   Workflow filename:  publish.yml     <- must match THIS file's name exactly
+#   Environment:        (leave blank)
+#   Allowed actions:    npm publish
+#
+# Requires npm >= 11.5.1 and Node >= 22.14.0.
 
 on:
   release:
@@ -11,13 +26,13 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Run through build + pack without publishing'
+        description: 'Build and pack without publishing'
         type: boolean
         default: false
 
 permissions:
   contents: read
-  id-token: write # REQUIRED for provenance. Without this npm silently skips attestation.
+  id-token: write # REQUIRED. Without it the OIDC exchange fails and npm asks for a token instead.
 
 jobs:
   publish:
@@ -27,17 +42,33 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20' # ships npm 10.x; provenance needs >= 9.5
+          node-version: '22' # trusted publishing needs >= 22.14.0
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Verify npm supports provenance
+      - name: Upgrade npm for trusted publishing
+        # Node 22 ships npm 10.x; trusted publishing needs >= 11.5.1.
         run: |
-          echo "npm $(npm --version)"
-          node -e "process.exit(require('semver-compare-lite') ? 0 : 0)" || true
-          npm --version | awk -F. '{ if ($1 < 9 || ($1 == 9 && $2 < 5)) { print "npm too old for --provenance"; exit 1 } }'
+          npm install -g npm@latest
+          npm --version
+          node --version
+
+      - name: Verify toolchain meets trusted-publishing minimums
+        run: |
+          node -e '
+            const [nMaj, nMin] = process.versions.node.split(".").map(Number);
+            if (nMaj < 22 || (nMaj === 22 && nMin < 14)) {
+              console.error(`Node ${process.versions.node} too old, need >= 22.14.0`);
+              process.exit(1);
+            }
+            console.log(`Node ${process.versions.node} OK`);
+          '
+          npm --version | awk -F. '{
+            if ($1 < 11 || ($1 == 11 && ($2 < 5 || ($2 == 5 && $3 < 1)))) {
+              print "npm too old for trusted publishing, need >= 11.5.1"; exit 1
+            }
+          }'
 
       - name: Install dependencies
-        # Use `npm ci` if a package-lock.json is committed; otherwise `npm install`.
         run: |
           if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
@@ -48,7 +79,7 @@ jobs:
         run: npm run build
 
       - name: Verify no runtime dependencies
-        # n8n's verification scan rejects community nodes that ship runtime deps.
+        # n8n's community-node verification scan rejects packages shipping runtime deps.
         # devDependencies and peerDependencies are fine.
         run: |
           DEPS=$(node -p "JSON.stringify(require('./package.json').dependencies || {})")
@@ -59,8 +90,6 @@ jobs:
           echo "No runtime dependencies. Good."
 
       - name: Verify repository field matches this repo
-        # Provenance attestation fails if package.json repository.url does not
-        # resolve to the repo that is building it.
         run: |
           REPO_URL=$(node -p "(require('./package.json').repository||{}).url || ''")
           echo "package.json repository.url = $REPO_URL"
@@ -73,17 +102,18 @@ jobs:
         if: inputs.dry_run
         run: npm pack --dry-run
 
-      - name: Publish with provenance
+      - name: Publish via trusted publishing
         if: ${{ !inputs.dry_run }}
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # No NODE_AUTH_TOKEN and no --provenance: OIDC covers auth, and npm
+        # attaches provenance automatically for a public repo + public package.
+        run: npm publish --access public
 
-      - name: Confirm provenance is live
+      - name: Confirm provenance registered
         if: ${{ !inputs.dry_run }}
         run: |
           sleep 20
           PKG=$(node -p "require('./package.json').name")
           VER=$(node -p "require('./package.json').version")
-          echo "Check: https://www.npmjs.com/package/$PKG/v/$VER#provenance"
-          npm view "$PKG@$VER" dist.attestations || echo "Attestations not indexed yet, check the URL above in a few minutes."
+          echo "Verify at: https://www.npmjs.com/package/$PKG/v/$VER#provenance"
+          npm view "$PKG@$VER" dist.attestations \
+            || echo "Not indexed yet. Check the URL above in a few minutes."
