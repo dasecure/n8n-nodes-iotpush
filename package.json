@@ -1,0 +1,58 @@
+{
+  "name": "n8n-nodes-iotpush",
+  "version": "1.1.0",
+  "description": "n8n community node for iotpush - Multi-channel IoT push notifications with two-way action buttons",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "iotpush",
+    "push-notifications",
+    "iot",
+    "webhooks"
+  ],
+  "license": "MIT",
+  "homepage": "https://www.iotpush.com",
+  "author": {
+    "name": "DaSecure Solutions LLC",
+    "email": "vincent@dasecure.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dasecure/n8n-nodes-iotpush.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dasecure/n8n-nodes-iotpush/issues"
+  },
+  "engines": {
+    "node": ">=20.15"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc && gulp build:icons",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build",
+    "lint": "tsc --noEmit"
+  },
+  "files": [
+    "dist"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/IoTPushApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/IoTPush/IoTPush.node.js",
+      "dist/nodes/IoTPush/IoTPushTrigger.node.js"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "gulp": "^5.0.0",
+    "n8n-workflow": "*",
+    "typescript": "~5.4.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  }
+}

@@ -1,0 +1,89 @@
+name: Publish to npm
+
+# Publishes n8n-nodes-iotpush with npm provenance (sigstore attestation).
+# Provenance CANNOT be generated from a local machine — it requires an OIDC
+# token that only GitHub Actions can mint. This is the hard blocker for
+# n8n community-node verification.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run through build + pack without publishing'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write # REQUIRED for provenance. Without this npm silently skips attestation.
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20' # ships npm 10.x; provenance needs >= 9.5
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify npm supports provenance
+        run: |
+          echo "npm $(npm --version)"
+          node -e "process.exit(require('semver-compare-lite') ? 0 : 0)" || true
+          npm --version | awk -F. '{ if ($1 < 9 || ($1 == 9 && $2 < 5)) { print "npm too old for --provenance"; exit 1 } }'
+
+      - name: Install dependencies
+        # Use `npm ci` if a package-lock.json is committed; otherwise `npm install`.
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify no runtime dependencies
+        # n8n's verification scan rejects community nodes that ship runtime deps.
+        # devDependencies and peerDependencies are fine.
+        run: |
+          DEPS=$(node -p "JSON.stringify(require('./package.json').dependencies || {})")
+          if [ "$DEPS" != "{}" ]; then
+            echo "::error::Runtime dependencies present, n8n verification will fail: $DEPS"
+            exit 1
+          fi
+          echo "No runtime dependencies. Good."
+
+      - name: Verify repository field matches this repo
+        # Provenance attestation fails if package.json repository.url does not
+        # resolve to the repo that is building it.
+        run: |
+          REPO_URL=$(node -p "(require('./package.json').repository||{}).url || ''")
+          echo "package.json repository.url = $REPO_URL"
+          case "$REPO_URL" in
+            *"$GITHUB_REPOSITORY"*) echo "Matches $GITHUB_REPOSITORY" ;;
+            *) echo "::error::repository.url does not reference $GITHUB_REPOSITORY"; exit 1 ;;
+          esac
+
+      - name: Pack (dry run)
+        if: inputs.dry_run
+        run: npm pack --dry-run
+
+      - name: Publish with provenance
+        if: ${{ !inputs.dry_run }}
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Confirm provenance is live
+        if: ${{ !inputs.dry_run }}
+        run: |
+          sleep 20
+          PKG=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          echo "Check: https://www.npmjs.com/package/$PKG/v/$VER#provenance"
+          npm view "$PKG@$VER" dist.attestations || echo "Attestations not indexed yet, check the URL above in a few minutes."
