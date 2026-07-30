@@ -29,6 +29,10 @@ on:
         description: 'Build and pack without publishing'
         type: boolean
         default: false
+      npm_version:
+        description: 'npm version to install (use 11 if latest regresses on OIDC)'
+        type: string
+        default: 'latest'
 
 permissions:
   contents: read
@@ -58,7 +62,7 @@ jobs:
       - name: Upgrade npm for trusted publishing
         # Node 22 ships npm 10.x; trusted publishing needs >= 11.5.1.
         run: |
-          npm install -g npm@latest
+          npm install -g "npm@${{ inputs.npm_version || 'latest' }}"
           npm --version
           node --version
 
@@ -132,11 +136,56 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ''
 
+      - name: Diagnose OIDC availability
+        # ENEEDAUTH with no token configured means npm never attempted the OIDC
+        # exchange. The usual cause is that GitHub did not inject the ID-token
+        # request variables, which happens when id-token: write is not in
+        # effect. This step proves whether the plumbing exists before we blame
+        # npm or the trusted-publisher config. No secret is printed.
+        run: |
+          echo "node   $(node --version)"
+          echo "npm    $(npm --version)"
+          echo "repo   $GITHUB_REPOSITORY"
+          echo "ref    $GITHUB_REF"
+          echo "wf     $GITHUB_WORKFLOW_REF"
+          echo ""
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::ACTIONS_ID_TOKEN_REQUEST_URL is NOT set. id-token: write is not in effect, so OIDC cannot work. Check repo Settings -> Actions -> General -> Workflow permissions."
+            exit 1
+          fi
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL   present"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+present}${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-MISSING}"
+          echo ""
+          echo "Requesting an OIDC token for audience npm:registry.npmjs.org ..."
+          RESP=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org")
+          TOKEN=$(node -e '
+            let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+              try { process.stdout.write(JSON.parse(s).value || "") } catch { process.stdout.write("") }
+            })' <<<"$RESP")
+          if [ -z "$TOKEN" ]; then
+            echo "::error::GitHub refused to mint an OIDC token. Response (no token present): $RESP"
+            exit 1
+          fi
+          echo "OIDC token minted OK (length ${#TOKEN})"
+          # Decode only the non-sensitive claims that npm matches against.
+          node -e '
+            const p = process.argv[1].split(".")[1];
+            const c = JSON.parse(Buffer.from(p, "base64url").toString());
+            console.log("  sub        ", c.sub);
+            console.log("  repository ", c.repository);
+            console.log("  workflow   ", c.workflow_ref);
+            console.log("  ref        ", c.ref);
+            console.log("  environment", c.environment ?? "(none)");
+          ' "$TOKEN"
+          echo ""
+          echo "These must match the npm trusted-publisher config exactly."
+
       - name: Publish via trusted publishing
         if: ${{ !inputs.dry_run }}
         # No NPM_TOKEN and no --provenance: OIDC covers auth, and npm attaches
         # provenance automatically for a public repo + public package.
-        run: npm publish --access public
+        run: npm publish --access public --loglevel verbose
         env:
           # Belt and braces: blank this even though registry-url is unset, so a
           # future edit re-adding registry-url cannot silently break OIDC again.
