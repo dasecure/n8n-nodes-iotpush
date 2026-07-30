@@ -179,7 +179,11 @@ export class IoTPush implements INodeType {
 						placeholder: 'https://your-n8n/webhook/...',
 						description:
 							'Where iotpush posts the result when a user taps an action. Paste the Production URL from an IoTPush Trigger node here to start a workflow on tap.',
-						routing: { send: { type: 'body', property: 'callback_url' } },
+						// The API reads this from body key `callback` (NOT `callback_url` --
+						// that name is only used in the database and delivery payload).
+						// 1.1.1 sent `callback_url`, which the server silently dropped, so
+						// taps recorded but never dispatched. Fixed in 1.1.2.
+						routing: { send: { type: 'body', property: 'callback' } },
 					},
 				],
 			},
