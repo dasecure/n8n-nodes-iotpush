@@ -1,6 +1,5 @@
 import type {
 	IDataObject,
-	IHookFunctions,
 	INodeType,
 	INodeTypeDescription,
 	IWebhookFunctions,
@@ -8,23 +7,37 @@ import type {
 } from 'n8n-workflow';
 import { NodeConnectionTypes } from 'n8n-workflow';
 
-const BASE_URL = 'https://www.iotpush.com';
-
 /**
  * IoTPush Trigger
  *
- * Starts an n8n workflow when something happens on an iotpush topic:
- * a user taps an action button, a message is delivered, read, or expires.
+ * Starts a workflow when someone acts on an iotpush notification: taps an
+ * action button, or sends a text reply.
  *
- * This closes the "n8n can only send, never receive" gap.
+ * HOW IT WORKS
+ * ------------
+ * iotpush delivers action results to the `callback_url` carried on the message
+ * itself (see POST /api/action). So this node is a passive listener:
  *
- * Registration lifecycle uses iotpush's existing outbound webhook API:
- *   POST   /api/webhooks                    -> create   { url, events, topic_ids }
- *   GET    /api/webhooks                    -> list (used by checkExists)
- *   DELETE /api/webhooks/{webhook_id}       -> delete
+ *   1. Copy this node's Production Webhook URL from the panel above.
+ *   2. Paste it into the IoTPush node's "Callback URL" field on Send Push.
+ *   3. Add Action Buttons to that same Send Push node.
  *
- * REQUIRES the server-side auth patch (see server-patch/webhooks-apikey-auth.md).
- * Today /api/webhooks only accepts a cookie session, so a topic API key gets 401.
+ * When the user taps a button, iotpush POSTs here and the workflow runs.
+ *
+ * There is deliberately no webhook auto-registration. iotpush does expose a
+ * /api/webhooks CRUD API, but nothing server-side ever reads that table to
+ * dispatch events -- registered webhooks are stored and never fired (only
+ * /api/webhooks/{id}/test pings them manually). Registering there would look
+ * like it worked and then never trigger. The per-message callback_url path is
+ * the one that actually delivers.
+ *
+ * INCOMING PAYLOAD (from /api/action)
+ * -----------------------------------
+ * {
+ *   event: "action", receipt_id, message_id, topic_id,
+ *   action: "approve", action_label: "Approve", reply: null,
+ *   user_id, device: "iPhone 17 Pro Max", timestamp
+ * }
  */
 export class IoTPushTrigger implements INodeType {
 	description: INodeTypeDescription = {
@@ -33,19 +46,12 @@ export class IoTPushTrigger implements INodeType {
 		icon: 'file:iotpush.svg',
 		group: ['trigger'],
 		version: 1,
-		subtitle: '={{$parameter["topic"]}}',
-		description: 'Starts the workflow on iotpush events (action tapped, delivered, read, expired)',
+		description: 'Starts the workflow when a user taps an action button or replies to a notification',
 		defaults: {
 			name: 'IoTPush Trigger',
 		},
 		inputs: [],
 		outputs: [NodeConnectionTypes.Main],
-		credentials: [
-			{
-				name: 'ioTPushApi',
-				required: true,
-			},
-		],
 		webhooks: [
 			{
 				name: 'default',
@@ -56,43 +62,20 @@ export class IoTPushTrigger implements INodeType {
 		],
 		properties: [
 			{
-				displayName: 'Topic',
-				name: 'topic',
-				type: 'string',
-				required: true,
+				displayName:
+					'Copy the <b>Production URL</b> above into the <b>Callback URL</b> field of your IoTPush "Send Push" node, then add Action Buttons to that node. Tapping a button triggers this workflow.',
+				name: 'setupNotice',
+				type: 'notice',
 				default: '',
-				placeholder: 'my-topic',
-				description: 'The iotpush topic to listen on. Must match the topic your API key belongs to.',
 			},
 			{
-				displayName: 'Events',
-				name: 'events',
-				type: 'multiOptions',
-				required: true,
-				default: ['action'],
-				description: 'Which iotpush events should start this workflow',
-				options: [
-					{
-						name: 'Action Tapped',
-						value: 'action',
-						description: 'A user tapped an action button or sent a reply on a notification',
-					},
-					{
-						name: 'Delivered',
-						value: 'delivered',
-						description: 'A notification reached the device',
-					},
-					{
-						name: 'Read',
-						value: 'read',
-						description: 'A user opened the notification',
-					},
-					{
-						name: 'Expired',
-						value: 'expired',
-						description: 'A notification expired before being acted on',
-					},
-				],
+				displayName: 'Only These Action IDs',
+				name: 'actionIds',
+				type: 'string',
+				default: '',
+				placeholder: 'approve,reject',
+				description:
+					'Comma-separated action IDs. When set, other actions are acknowledged with 200 but do not start the workflow. Leave empty to accept every action.',
 			},
 			{
 				displayName: 'Options',
@@ -102,138 +85,90 @@ export class IoTPushTrigger implements INodeType {
 				default: {},
 				options: [
 					{
-						displayName: 'Only These Action IDs',
-						name: 'actionIds',
+						displayName: 'Shared Secret Header',
+						name: 'secretHeader',
 						type: 'string',
 						default: '',
-						placeholder: 'approve,reject',
+						placeholder: 'X-Callback-Token',
 						description:
-							'Comma-separated action IDs. When set, only these actions start the workflow, everything else is acknowledged and dropped.',
+							'Name of a header to require on incoming requests. Set the same header via Callback Headers on the Send Push node. Requests without a matching value are rejected with 401.',
+					},
+					{
+						displayName: 'Shared Secret Value',
+						name: 'secretValue',
+						type: 'string',
+						typeOptions: { password: true },
+						default: '',
+						description: 'Expected value for the shared secret header',
+					},
+					{
+						displayName: 'Ignore Test Pings',
+						name: 'ignoreTest',
+						type: 'boolean',
+						default: false,
+						description:
+							'Whether to drop payloads with event "test" (sent by /api/webhooks/{id}/test) instead of starting the workflow',
 					},
 					{
 						displayName: 'Raw Body',
 						name: 'rawBody',
 						type: 'boolean',
 						default: false,
-						description: 'Whether to output the untouched webhook payload instead of the normalised shape',
+						description: 'Whether to output the untouched payload instead of the normalised shape',
 					},
 				],
 			},
 		],
 	};
 
-	webhookMethods = {
-		default: {
-			async checkExists(this: IHookFunctions): Promise<boolean> {
-				const webhookData = this.getWorkflowStaticData('node');
-				const webhookUrl = this.getNodeWebhookUrl('default');
-
-				if (webhookData.webhookId !== undefined) {
-					return true;
-				}
-
-				// No stored ID: look for an orphan registration pointing at this URL
-				// (happens when a workflow is duplicated or static data is cleared).
-				try {
-					const existing = (await this.helpers.httpRequestWithAuthentication.call(
-						this,
-						'ioTPushApi',
-						{
-							method: 'GET',
-							url: `${BASE_URL}/api/webhooks`,
-							json: true,
-						},
-					)) as IDataObject[];
-
-					for (const hook of existing ?? []) {
-						if (hook.url === webhookUrl) {
-							webhookData.webhookId = hook.id;
-							return true;
-						}
-					}
-				} catch {
-					// Listing is best-effort. Fall through to create.
-					return false;
-				}
-
-				return false;
-			},
-
-			async create(this: IHookFunctions): Promise<boolean> {
-				const webhookUrl = this.getNodeWebhookUrl('default');
-				const topic = this.getNodeParameter('topic') as string;
-				const events = this.getNodeParameter('events') as string[];
-				const webhookData = this.getWorkflowStaticData('node');
-
-				const response = (await this.helpers.httpRequestWithAuthentication.call(
-					this,
-					'ioTPushApi',
-					{
-						method: 'POST',
-						url: `${BASE_URL}/api/webhooks`,
-						body: {
-							url: webhookUrl,
-							events,
-							topic_ids: [topic],
-						},
-						json: true,
-					},
-				)) as IDataObject;
-
-				if (response?.id === undefined) {
-					return false;
-				}
-
-				webhookData.webhookId = response.id;
-				webhookData.topic = topic;
-				return true;
-			},
-
-			async delete(this: IHookFunctions): Promise<boolean> {
-				const webhookData = this.getWorkflowStaticData('node');
-
-				if (webhookData.webhookId === undefined) {
-					return true;
-				}
-
-				try {
-					await this.helpers.httpRequestWithAuthentication.call(this, 'ioTPushApi', {
-						method: 'DELETE',
-						url: `${BASE_URL}/api/webhooks/${webhookData.webhookId}`,
-						json: true,
-					});
-				} catch {
-					// Already gone server-side, or the account was rotated. Clear locally either way.
-					delete webhookData.webhookId;
-					delete webhookData.topic;
-					return false;
-				}
-
-				delete webhookData.webhookId;
-				delete webhookData.topic;
-				return true;
-			},
-		},
-	};
-
 	async webhook(this: IWebhookFunctions): Promise<IWebhookResponseData> {
 		const body = this.getBodyData() as IDataObject;
+		const headers = this.getHeaderData() as IDataObject;
+
+		const actionIds = this.getNodeParameter('actionIds', '') as string;
 		const options = this.getNodeParameter('options', {}) as {
-			actionIds?: string;
+			secretHeader?: string;
+			secretValue?: string;
+			ignoreTest?: boolean;
 			rawBody?: boolean;
 		};
 
-		// Action filter: acknowledge but do not start the workflow.
-		if (options.actionIds) {
-			const allowed = options.actionIds
+		// Optional shared-secret check. iotpush does not sign callback_url
+		// deliveries, so a header set through callback_headers is the practical
+		// way to keep a public n8n webhook from being triggered by anyone.
+		if (options.secretHeader) {
+			const received = headers[options.secretHeader.toLowerCase()];
+			if (received !== options.secretValue) {
+				return {
+					webhookResponse: {
+						status: 401,
+						body: { error: 'Invalid or missing shared secret' },
+					},
+					noWebhookResponse: false,
+				};
+			}
+		}
+
+		const event = (body.event ?? 'unknown') as string;
+
+		if (options.ignoreTest && event === 'test') {
+			return { webhookResponse: { received: true, ignored: 'test ping' } };
+		}
+
+		// /api/action sends `action` as a plain string id, with the human label
+		// in `action_label`. The test endpoint sends action: "test_action".
+		const actionId = (body.action ?? body.action_id) as string | undefined;
+
+		if (actionIds.trim()) {
+			const allowed = actionIds
 				.split(',')
 				.map((id) => id.trim())
 				.filter(Boolean);
 
-			const incoming = (body.action_id ?? (body.action as IDataObject)?.id) as string | undefined;
-
-			if (allowed.length > 0 && (incoming === undefined || !allowed.includes(incoming))) {
-				return { webhookResponse: { received: true, ignored: true } };
+			if (allowed.length > 0 && (actionId === undefined || !allowed.includes(actionId))) {
+				return {
+					webhookResponse: { received: true, ignored: `action "${actionId}" not in filter` },
+				};
 			}
 		}
 
@@ -242,15 +177,17 @@ export class IoTPushTrigger implements INodeType {
 		}
 
 		const normalised: IDataObject = {
-			event: body.event ?? body.type ?? 'unknown',
-			messageId: body.message_id ?? (body.message as IDataObject)?.id,
-			topic: body.topic ?? (body.topic_id as string),
-			actionId: body.action_id ?? (body.action as IDataObject)?.id,
-			actionLabel: (body.action as IDataObject)?.label,
-			replyText: body.reply_text,
-			deviceId: body.device_id,
-			deviceName: body.device_name,
-			timestamp: body.created_at ?? body.timestamp ?? new Date().toISOString(),
+			event,
+			actionId: actionId ?? null,
+			actionLabel: (body.action_label ?? null) as string | null,
+			reply: (body.reply ?? body.reply_text ?? null) as string | null,
+			messageId: (body.message_id ?? null) as string | null,
+			receiptId: (body.receipt_id ?? null) as string | null,
+			topicId: (body.topic_id ?? null) as string | null,
+			device: (body.device ?? body.device_name ?? null) as string | null,
+			userId: (body.user_id ?? null) as string | null,
+			timestamp: (body.timestamp ?? new Date().toISOString()) as string,
+			isTest: event === 'test',
 			raw: body,
 		};
 

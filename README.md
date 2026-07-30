@@ -96,29 +96,59 @@ Connect a **Cron** trigger → **HTTP Request** (check your service) → **IF** 
 ## Two-way notifications (new in 1.1.0)
 
 iotpush notifications can carry **action buttons**. Combine the `IoTPush` node with the
-`IoTPush Trigger` node to put a human in the middle of a workflow:
+`IoTPush Trigger` node to put a human in the middle of a workflow.
 
-1. **IoTPush** → Send Push, with Action Buttons `approve` / `reject`
-2. **IoTPush Trigger** → listening on the same topic for the `action` event
-3. A **Switch** node on `{{ $json.actionId }}` branches the workflow
+### Wiring it up
+
+1. Add an **IoTPush Trigger** node. Copy its **Production URL**.
+2. Add an **IoTPush** node, operation **Send Push**.
+3. Paste that URL into the Send Push node's **Callback URL** field.
+4. Add **Action Buttons** to the Send Push node, e.g. `approve` / `reject`.
+
+When the user taps a button on their phone, iotpush POSTs the result to the trigger and the
+workflow continues.
 
 ```
 Deploy pipeline ──> IoTPush (Send: "Deploy v2.3 to prod?" [Approve][Reject])
                                             │
                           (user taps on their phone)
                                             │
-                    IoTPush Trigger (event: action) ──> Switch on actionId
-                                                          ├─ approve ─> deploy
-                                                          └─ reject  ─> notify team
+                    IoTPush Trigger ──> Switch on actionId
+                                          ├─ approve ─> deploy
+                                          └─ reject  ─> notify team
 ```
 
-The trigger also fires on `delivered`, `read`, and `expired`, and exposes `replyText` when the
-user sends a text reply instead of tapping a button.
+### Trigger output
 
-### Trigger node requirements
+```json
+{
+  "event": "action",
+  "actionId": "approve",
+  "actionLabel": "Approve",
+  "reply": null,
+  "messageId": "...",
+  "receiptId": "...",
+  "topicId": "...",
+  "device": "iPhone 17 Pro Max",
+  "userId": "...",
+  "timestamp": "2026-07-30T00:34:25Z",
+  "isTest": false,
+  "raw": { }
+}
+```
 
-The trigger registers its own webhook via `POST /api/webhooks` on workflow activation and removes
-it on deactivation. This requires an API key with permission to manage webhooks for its topic.
+Branch on `actionId` with a Switch node. `reply` carries free-text when the user replies
+instead of tapping a button.
+
+### Securing the callback
+
+iotpush does not sign callback deliveries, and an n8n Production webhook URL is publicly
+reachable. Use a shared secret:
+
+- On **Send Push**, add a **Callback Header** such as `X-Callback-Token` with a random value.
+- On **IoTPush Trigger**, set **Shared Secret Header** and **Shared Secret Value** to match.
+
+Requests without the matching header are rejected with 401.
 
 ## Nodes
 

@@ -176,9 +176,9 @@ export class IoTPush implements INodeType {
 						name: 'callbackUrl',
 						type: 'string',
 						default: '',
-						placeholder: 'https://example.com/webhook',
+						placeholder: 'https://your-n8n/webhook/...',
 						description:
-							'Where iotpush posts the result when a user taps an action. Leave empty when using the IoTPush Trigger node, which registers its own webhook.',
+							'Where iotpush posts the result when a user taps an action. Paste the Production URL from an IoTPush Trigger node here to start a workflow on tap.',
 						routing: { send: { type: 'body', property: 'callback_url' } },
 					},
 				],
@@ -228,6 +228,57 @@ export class IoTPush implements INodeType {
 						type: 'body',
 						property: 'actions',
 						value: '={{ $parameter["actionsUi"].action || [] }}',
+					},
+				},
+			},
+
+			// ------ Callback headers ------
+			// iotpush does not sign callback_url deliveries, so a shared-secret
+			// header is the practical way to authenticate the callback against a
+			// publicly reachable n8n webhook. Pair with Shared Secret Header on
+			// the IoTPush Trigger node.
+			{
+				displayName: 'Callback Headers',
+				name: 'callbackHeadersUi',
+				type: 'fixedCollection',
+				placeholder: 'Add Header',
+				default: {},
+				typeOptions: { multipleValues: true },
+				description:
+					'Headers iotpush sends with the callback. Use a shared secret here and verify it on the IoTPush Trigger node.',
+				displayOptions: {
+					show: { resource: ['message'], operation: ['sendPush'] },
+				},
+				options: [
+					{
+						displayName: 'Header',
+						name: 'header',
+						values: [
+							{
+								displayName: 'Name',
+								name: 'name',
+								type: 'string',
+								default: '',
+								placeholder: 'X-Callback-Token',
+								required: true,
+							},
+							{
+								displayName: 'Value',
+								name: 'value',
+								type: 'string',
+								typeOptions: { password: true },
+								default: '',
+								required: true,
+							},
+						],
+					},
+				],
+				routing: {
+					send: {
+						type: 'body',
+						property: 'callback_headers',
+						value:
+							'={{ Object.fromEntries((($parameter["callbackHeadersUi"] || {}).header || []).map(h => [h.name, h.value])) }}',
 					},
 				},
 			},
